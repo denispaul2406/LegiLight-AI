@@ -34,7 +34,14 @@
 - **Dual Analysis Modes**: Standard (fast) and Enhanced (comprehensive CUAD analysis)
 - **Smart Risk Detection**: AI-powered identification of red, yellow, and green flags
 - **Confidence Scoring**: Real-time AI reliability metrics (typically 95%+ accuracy)
-- **Multi-format Support**: .txt, .docx, and .pdf file processing
+- **Multi-format Support**: .txt, .docx, .pdf, and image files (.jpg, .png, .gif, .bmp)
+
+### 🇮🇳 **Indian MSME Compliance Focus**
+- **GST Compliance Checking**: Automated GST registration, HSN/SAC codes, and tax rate validation
+- **Labor Law Analysis**: Minimum wages, PF contributions, working hours, and safety compliance
+- **Commercial Contract Review**: Payment terms, force majeure, dispute resolution, and liability clauses
+- **Multi-language Support**: Hindi, Tamil, Bengali, Marathi with automatic translation
+- **OCR for Handwritten Documents**: Google Vision API + Tesseract fallback for vernacular documents
 
 ### 💬 **Interactive Q&A System**
 - **Natural Language Queries**: Ask questions about any analyzed document
@@ -139,6 +146,38 @@ graph TD
    DB_NAME="legidocs_database" 
    GEMINI_API_KEY="your-GEMINI_API_KEY"
    CORS_ORIGINS="*"
+   
+   # Google Cloud Services (Optional - features disabled if not provided)
+   GCP_PROJECT_ID="your-gcp-project-id"
+   GCP_REGION="asia-south1"
+   VISION_ENABLED="true"
+   TRANSLATE_ENABLED="true"
+   TRANSLATE_TARGETS="hi,bn,ta,mr"
+   VERTEX_ENABLED="true"
+   VERTEX_PROJECT_ID="your-gcp-project-id"
+   VERTEX_LOCATION="asia-south1"
+   
+   # BigQuery Analytics (Optional)
+   BQ_ENABLED="true"
+   BQ_PROJECT_ID="your-gcp-project-id"
+   BQ_DATASET="legilight"
+   BQ_TABLE="document_events"
+   
+   # Pub/Sub Events (Optional)
+   PUBSUB_ENABLED="true"
+   PUBSUB_TOPIC="analysis-completed"
+   
+   # Hugging Face (Alternative to Vertex AI)
+   HF_TOKEN="your-huggingface-token"
+   
+   # Privacy & Performance
+   PRIVACY_STORE_FULL_TEXT="false"
+   MAX_UPLOAD_MB="5"
+   OCR_CONFIDENCE_THRESHOLD="0.7"
+   TRANSLATE_CONFIDENCE_THRESHOLD="0.8"
+   COMPLIANCE_CONFIDENCE_THRESHOLD="0.7"
+   RULES_CONFIDENCE_THRESHOLD="0.7"
+   MAX_RULES_PER_DOMAIN="50"
    
    # Frontend (.env)
    REACT_APP_BACKEND_URL="http://localhost:8001"
@@ -276,6 +315,155 @@ Response: {
       "text": "EMPLOYMENT AGREEMENT..."
     }
   ]
+}
+```
+
+#### OCR Analysis (NEW)
+```http
+POST /api/ocr/analyze
+Content-Type: multipart/form-data
+
+Form Data:
+- file: [image file: .jpg, .png, .gif, .bmp]
+
+Response: {
+  "success": true,
+  "text": "Extracted text from image",
+  "confidence": 0.95,
+  "language": "hi",
+  "method": "vision",
+  "metadata": {
+    "document_type": "gst_form",
+    "document_confidence": 0.88,
+    "indicators": ["gst", "invoice"]
+  }
+}
+```
+
+#### Translation (NEW)
+```http
+POST /api/translate
+Content-Type: application/json
+
+{
+  "text": "Document text to translate",
+  "target_language": "hi",
+  "source_language": "en"
+}
+
+Response: {
+  "success": true,
+  "translated_text": "Translated text",
+  "source_language": "en",
+  "target_language": "hi",
+  "confidence": 0.92,
+  "method": "google"
+}
+```
+
+#### India MSME Compliance Analysis (NEW)
+```http
+POST /api/analyze/compliance
+Content-Type: application/json
+
+{
+  "document_text": "Contract or compliance document text",
+  "document_name": "GST Invoice",
+  "document_type": "gst_form",
+  "domains": ["gst", "labor", "contract"],
+  "translate": true,
+  "target_language": "en"
+}
+
+Response: {
+  "success": true,
+  "analysis_id": "compliance_1699123456789",
+  "compliance_score": 0.75,
+  "violations": [
+    {
+      "rule_name": "GST Registration Required",
+      "severity": "high",
+      "message": "GST registration number is missing",
+      "remediation": "Obtain GST registration and include GSTIN"
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "high",
+      "description": "Include GST registration details"
+    }
+  ],
+  "categories_analyzed": ["gst_compliance", "labor_laws"],
+  "confidence": 0.88,
+  "processing_time": 2.5,
+  "rules_evaluated": 15,
+  "document_type": "gst_form",
+  "languages_detected": ["hi", "en"],
+  "ocr_used": false,
+  "translation_used": true
+}
+```
+
+#### Custom Rules Management (NEW)
+```http
+# Create Rule
+POST /api/rules
+{
+  "name": "Custom GST Rule",
+  "description": "Check for GST number format",
+  "pattern": "gstin\\s*:?\\s*[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z]{1}[0-9A-Z]{1}",
+  "severity": "high",
+  "domain": "gst",
+  "category": "registration",
+  "message": "Invalid GST number format",
+  "remediation": "Use correct GST number format"
+}
+
+# Get Rules
+GET /api/rules?domain=gst
+
+# Update Rule
+PUT /api/rules/{rule_id}
+{
+  "severity": "medium"
+}
+
+# Delete Rule
+DELETE /api/rules/{rule_id}
+
+# Test Rule Pattern
+POST /api/rules/test
+{
+  "pattern": "gstin\\s*:?\\s*[0-9]{2}",
+  "test_text": "GSTIN: 123456789012345"
+}
+```
+
+#### Compliance Benchmarks (NEW)
+```http
+GET /api/benchmarks?sector=manufacturing&state=maharashtra&days=30
+
+Response: {
+  "success": true,
+  "data": {
+    "sector": "manufacturing",
+    "state": "maharashtra",
+    "days": 30,
+    "data": [
+      {
+        "document_type": "gst_form",
+        "risk_level": "medium",
+        "avg_compliance_score": 0.72,
+        "avg_confidence": 0.85,
+        "document_count": 150
+      }
+    ],
+    "summary": {
+      "total_documents": 239,
+      "avg_compliance_score": 0.70,
+      "risk_distribution": {"low": 0.3, "medium": 0.5, "high": 0.2}
+    }
+  }
 }
 ```
 

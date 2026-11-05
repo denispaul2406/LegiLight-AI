@@ -1,0 +1,36 @@
+{
+  "short_name": "LegiLight AI",
+  "name": "LegiLight AI - Indian MSME Compliance Assistant",
+  "description": "AI-powered legal document analysis and compliance checking for Indian MSMEs",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#2563eb",
+  "background_color": "#ffffff",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "en",
+  "categories": ["business", "productivity", "utilities"],
+  "screenshots": [
+    {
+      "src": "screenshot1.png",
+      "type": "image/png",
+      "sizes": "1280x720",
+      "form_factor": "wide"
+    }
+  ],
+  "features": [
+    "OCR for handwritten documents",
+    "Multi-language support (Hindi, Tamil, Bengali, Marathi)",
+    "GST compliance checking",
+    "Labor law analysis",
+    "Commercial contract review",
+    "Offline document analysis"
+  ]
+}

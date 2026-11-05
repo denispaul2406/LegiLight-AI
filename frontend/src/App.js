@@ -6,6 +6,9 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+// Configure axios defaults for cleaner calls and robust timeouts
+axios.defaults.baseURL = API;
+axios.defaults.timeout = 120000; // 120s to accommodate OCR/PDF/LLM calls
 
 const App = () => {
   const [currentView, setCurrentView] = useState('landing');
@@ -24,43 +27,18 @@ const App = () => {
   const [analyticsData, setAnalyticsData] = useState(null);
   const [useEnhancedAnalysis, setUseEnhancedAnalysis] = useState(true);
   const [showSuccessAnimation, setShowSuccessAnimation] = useState(false);
+  
+  // New state for enhanced features
+  const [selectedLanguage, setSelectedLanguage] = useState('en');
+  const [translateDocument, setTranslateDocument] = useState(false);
+  const [complianceAnalysis, setComplianceAnalysis] = useState(null);
+  const [benchmarksData, setBenchmarksData] = useState(null);
+  const [customRules, setCustomRules] = useState([]);
+  const [showComplianceView, setShowComplianceView] = useState(false);
+  const [imageFile, setImageFile] = useState(null);
+  const [ocrResult, setOcrResult] = useState(null);
 
-  // Add debugging for state changes
-  useEffect(() => {
-    console.log('App state updated:', {
-      currentView,
-      hasDocumentText: !!documentText,
-      hasDocumentFile: !!documentFile,
-      isAnalyzing,
-      useEnhancedAnalysis
-    });
-  }, [currentView, documentText, documentFile, isAnalyzing, useEnhancedAnalysis]);
-
-  // Add global event debugging
-  useEffect(() => {
-    const debugEvents = (e) => {
-      if (['click', 'submit', 'keydown', 'change'].includes(e.type)) {
-        console.log('Event triggered:', {
-          type: e.type,
-          target: e.target.tagName,
-          classList: e.target.className,
-          defaultPrevented: e.defaultPrevented
-        });
-      }
-    };
-    
-    document.addEventListener('click', debugEvents, true);
-    document.addEventListener('submit', debugEvents, true);
-    document.addEventListener('keydown', debugEvents, true);
-    document.addEventListener('change', debugEvents, true);
-    
-    return () => {
-      document.removeEventListener('click', debugEvents, true);
-      document.removeEventListener('submit', debugEvents, true);
-      document.removeEventListener('keydown', debugEvents, true);
-      document.removeEventListener('change', debugEvents, true);
-    };
-  }, []);
+  // Remove noisy development logs and global event listeners for a clean UX
 
   useEffect(() => {
     checkHealthStatus();
@@ -68,6 +46,13 @@ const App = () => {
     loadDocuments();
     loadCuadSamples();
     loadAnalyticsData();
+    loadBenchmarksData();
+    loadCustomRules();
+    
+    // Register service worker only in production to avoid caching during development
+    if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
   }, []);
 
   const checkHealthStatus = async () => {
@@ -116,6 +101,24 @@ const App = () => {
     }
   };
 
+  const loadBenchmarksData = async () => {
+    try {
+      const response = await axios.get(`${API}/benchmarks`);
+      setBenchmarksData(response.data.data || null);
+    } catch (error) {
+      console.error('Failed to load benchmarks data:', error);
+    }
+  };
+
+  const loadCustomRules = async () => {
+    try {
+      const response = await axios.get(`${API}/rules`);
+      setCustomRules(response.data.data?.rules || []);
+    } catch (error) {
+      console.error('Failed to load custom rules:', error);
+    }
+  };
+
   const handleFileUpload = useCallback((event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -123,10 +126,16 @@ const App = () => {
     const file = event.target.files[0];
     if (file) {
       const fileExtension = file.name.split('.').pop().toLowerCase();
-      const supportedFormats = ['txt', 'docx', 'pdf'];
+      const supportedFormats = ['txt', 'docx', 'pdf', 'jpg', 'jpeg', 'png', 'gif', 'bmp'];
       
       if (supportedFormats.includes(fileExtension)) {
-        if (fileExtension === 'txt') {
+        // Handle image files for OCR
+        if (['jpg', 'jpeg', 'png', 'gif', 'bmp'].includes(fileExtension)) {
+          setImageFile(file);
+          setDocumentName(file.name);
+          setDocumentFile(null);
+          setDocumentText('');
+        } else if (fileExtension === 'txt') {
           const reader = new FileReader();
           reader.onload = (e) => {
             setDocumentText(e.target.result);
@@ -139,10 +148,103 @@ const App = () => {
           setDocumentText('');
         }
       } else {
-        alert('Please upload a supported file format (.txt, .docx, .pdf)');
+        alert('Please upload a supported file format (.txt, .docx, .pdf, .jpg, .png, .gif, .bmp)');
       }
     }
   }, []);
+
+  const handleImageUpload = async (file) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await axios.post(`${API}/ocr/analyze`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      
+      setOcrResult(response.data);
+      setDocumentText(response.data.text);
+      setDocumentName(file.name);
+      
+      return response.data;
+    } catch (error) {
+      console.error('OCR analysis failed:', error);
+      alert('OCR analysis failed: ' + (error.response?.data?.detail || error.message));
+      return null;
+    }
+  };
+
+  const handleTranslation = async (text, targetLanguage) => {
+    try {
+      const response = await axios.post(`${API}/translate`, {
+        text: text,
+        target_language: targetLanguage
+      });
+      
+      return response.data;
+    } catch (error) {
+      console.error('Translation failed:', error);
+      alert('Translation failed: ' + (error.response?.data?.detail || error.message));
+      return null;
+    }
+  };
+
+  const analyzeCompliance = async () => {
+    if (!documentText.trim() && !documentFile && !imageFile) {
+      alert('Please enter document text, upload a file, or upload an image');
+      return;
+    }
+
+    setIsAnalyzing(true);
+    try {
+      let textToAnalyze = documentText;
+      let ocrUsed = false;
+      let translationUsed = false;
+
+      // Handle image OCR first
+      if (imageFile) {
+        const ocrData = await handleImageUpload(imageFile);
+        if (ocrData && ocrData.text) {
+          textToAnalyze = ocrData.text;
+          ocrUsed = true;
+        } else {
+          setIsAnalyzing(false);
+          return;
+        }
+      }
+
+      // Handle translation if requested
+      if (translateDocument && selectedLanguage !== 'en') {
+        const transData = await handleTranslation(textToAnalyze, selectedLanguage);
+        if (transData && transData.translated_text) {
+          textToAnalyze = transData.translated_text;
+          translationUsed = true;
+        }
+      }
+
+      // Run compliance analysis
+      const response = await axios.post(`${API}/analyze/compliance`, {
+        document_text: textToAnalyze,
+        document_name: documentName || 'Untitled Document',
+        translate: translateDocument,
+        target_language: selectedLanguage,
+        domains: ['gst', 'labor', 'contract']
+      });
+
+      setComplianceAnalysis(response.data);
+      setCurrentView('compliance-results');
+      setShowSuccessAnimation(true);
+      setTimeout(() => setShowSuccessAnimation(false), 3000);
+      
+    } catch (error) {
+      console.error('Compliance analysis failed:', error);
+      alert('Compliance analysis failed: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
 
   const handleSampleContract = (contract) => {
     setDocumentText(contract.text);
@@ -184,11 +286,11 @@ const App = () => {
         formData.append('analysis_type', useEnhancedAnalysis ? 'enhanced' : 'comprehensive');
         
         const endpoint = useEnhancedAnalysis ? '/analyze-enhanced/upload' : '/analyze/upload';
-        console.log('Making file upload request to:', `${API}${endpoint}`);
-        response = await axios.post(`${API}${endpoint}`, formData, {
+        response = await axios.post(endpoint, formData, {
           headers: {
             'Content-Type': 'multipart/form-data',
           },
+          timeout: 120000
         });
       } else {
         // Handle text input
@@ -198,8 +300,7 @@ const App = () => {
           document_name: documentName || 'Untitled Document',
           analysis_type: useEnhancedAnalysis ? 'enhanced' : 'comprehensive'
         };
-        console.log('Making text analysis request to:', `${API}${endpoint}`, payload);
-        response = await axios.post(`${API}${endpoint}`, payload);
+        response = await axios.post(endpoint, payload, { timeout: 120000 });
       }
 
       console.log('Analysis response:', response.data);
@@ -469,25 +570,59 @@ const App = () => {
                 AI-Enhanced Document Analysis
               </h2>
             </div>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <label className="text-sm font-medium text-gray-700">Enhanced Analysis</label>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setUseEnhancedAnalysis(!useEnhancedAnalysis);
-                  }}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    useEnhancedAnalysis ? 'bg-blue-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                    useEnhancedAnalysis ? 'translate-x-6' : 'translate-x-1'
-                  }`} />
-                </button>
-              </div>
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-gray-700">Enhanced Analysis</label>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setUseEnhancedAnalysis(!useEnhancedAnalysis);
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      useEnhancedAnalysis ? 'bg-blue-600' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                      useEnhancedAnalysis ? 'translate-x-6' : 'translate-x-1'
+                    }`} />
+                  </button>
+                </div>
+                
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-gray-700">Language:</label>
+                  <select
+                    value={selectedLanguage}
+                    onChange={(e) => setSelectedLanguage(e.target.value)}
+                    className="px-3 py-1 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="en">English</option>
+                    <option value="hi">Hindi</option>
+                    <option value="ta">Tamil</option>
+                    <option value="bn">Bengali</option>
+                    <option value="mr">Marathi</option>
+                  </select>
+                </div>
+                
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-gray-700">Translate to English</label>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setTranslateDocument(!translateDocument);
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      translateDocument ? 'bg-green-600' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                      translateDocument ? 'translate-x-6' : 'translate-x-1'
+                    }`} />
+                  </button>
+                </div>
               <button
                 type="button"
                 onClick={(e) => handleViewChange('landing', e)}
@@ -538,7 +673,7 @@ const App = () => {
                   <input
                     type="file"
                     onChange={handleFileUpload}
-                    accept=".txt,.docx,.pdf"
+                    accept=".txt,.docx,.pdf,.jpg,.jpeg,.png,.gif,.bmp"
                     className="hidden"
                     id="file-upload"
                   />
@@ -557,7 +692,7 @@ const App = () => {
                       }
                     </p>
                     <p className="text-xs text-gray-500">
-                      Supports: .txt, .docx, .pdf files (max 100KB)
+                      Supports: .txt, .docx, .pdf, .jpg, .png files (max 5MB)
                     </p>
                   </label>
                   
@@ -578,6 +713,28 @@ const App = () => {
                         className="mt-2 text-xs text-red-600 hover:text-red-800"
                       >
                         Remove file
+                      </button>
+                    </div>
+                  )}
+                  
+                  {imageFile && (
+                    <div className="mt-4 p-3 bg-blue-100 rounded-lg">
+                      <p className="text-sm text-blue-800 flex items-center justify-center space-x-2">
+                        <FileText className="w-4 h-4" />
+                        <span>{imageFile.name} (Image)</span>
+                      </p>
+                      <p className="text-xs text-blue-600 mt-1">Will be processed with OCR</p>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setImageFile(null);
+                          setDocumentName('');
+                        }}
+                        className="mt-2 text-xs text-red-600 hover:text-red-800"
+                      >
+                        Remove image
                       </button>
                     </div>
                   )}
@@ -610,42 +767,69 @@ const App = () => {
                 )}
               </div>
 
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  console.log('Analyze button clicked', {
-                    isAnalyzing,
-                    hasText: !!documentText.trim(),
-                    hasFile: !!documentFile,
-                    textLength: documentText.length
-                  });
-                  analyzeDocument();
-                }}
-                disabled={isAnalyzing || (!documentText.trim() && !documentFile)}
-                className={`w-full px-6 py-4 font-semibold rounded-lg transition-all duration-200 flex items-center justify-center space-x-2 btn-hover-lift shadow-xl ${
-                  useEnhancedAnalysis
-                    ? 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700'
-                    : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700'
-                } text-white disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                {isAnalyzing ? (
-                  <>
-                    <div className="rounded-full h-5 w-5 border-2 border-white border-t-transparent animate-spin" />
-                    <span>{documentFile ? 'Processing File with AI...' : 'Analyzing Document...'}</span>
-                  </>
-                ) : (
-                  <>
-                    <Brain className="w-5 h-5" />
-                    <span>
-                      {useEnhancedAnalysis ? 'Enhanced AI Analysis' : 'Standard Analysis'}
-                      {documentFile ? ` (${documentFile.name.split('.').pop().toUpperCase()})` : ''}
-                    </span>
-                    <Sparkles className="w-4 h-4" />
-                  </>
-                )}
-              </button>
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('Analyze button clicked', {
+                      isAnalyzing,
+                      hasText: !!documentText.trim(),
+                      hasFile: !!documentFile,
+                      hasImage: !!imageFile,
+                      textLength: documentText.length
+                    });
+                    analyzeDocument();
+                  }}
+                  disabled={isAnalyzing || (!documentText.trim() && !documentFile && !imageFile)}
+                  className={`w-full px-6 py-4 font-semibold rounded-lg transition-all duration-200 flex items-center justify-center space-x-2 btn-hover-lift shadow-xl ${
+                    useEnhancedAnalysis
+                      ? 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700'
+                      : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700'
+                  } text-white disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <div className="rounded-full h-5 w-5 border-2 border-white border-t-transparent animate-spin" />
+                      <span>{documentFile ? 'Processing File with AI...' : imageFile ? 'Processing Image with OCR...' : 'Analyzing Document...'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Brain className="w-5 h-5" />
+                      <span>
+                        {useEnhancedAnalysis ? 'Enhanced AI Analysis' : 'Standard Analysis'}
+                        {documentFile ? ` (${documentFile.name.split('.').pop().toUpperCase()})` : imageFile ? ' (OCR)' : ''}
+                      </span>
+                      <Sparkles className="w-4 h-4" />
+                    </>
+                  )}
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    analyzeCompliance();
+                  }}
+                  disabled={isAnalyzing || (!documentText.trim() && !documentFile && !imageFile)}
+                  className="w-full px-6 py-4 font-semibold rounded-lg transition-all duration-200 flex items-center justify-center space-x-2 btn-hover-lift shadow-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <div className="rounded-full h-5 w-5 border-2 border-white border-t-transparent animate-spin" />
+                      <span>Analyzing Compliance...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Shield className="w-5 h-5" />
+                      <span>India MSME Compliance Analysis</span>
+                      <Target className="w-4 h-4" />
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
             </form>
 
@@ -1125,6 +1309,287 @@ const App = () => {
     );
   };
 
+  // Compliance Results Component
+  const ComplianceResultsView = () => {
+    if (!complianceAnalysis) {
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 py-8">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="text-center">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">No Compliance Analysis Available</h2>
+              <button
+                onClick={(e) => handleViewChange('upload', e)}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                Start New Analysis
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 py-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center space-x-4">
+              <Shield className="w-8 h-8 text-green-500 animate-pulse" />
+              <h2 className="text-4xl font-bold bg-gradient-to-r from-green-600 to-blue-600 bg-clip-text text-transparent">
+                Compliance Analysis Complete
+              </h2>
+              <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm font-medium">
+                India MSME Focus
+              </span>
+            </div>
+            <div className="flex space-x-4">
+              <button
+                onClick={(e) => handleViewChange('upload', e)}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2 btn-hover-lift"
+              >
+                <Upload className="w-4 h-4" />
+                <span>New Analysis</span>
+              </button>
+              <button
+                onClick={(e) => handleViewChange('landing', e)}
+                className="px-4 py-2 text-gray-600 hover:text-gray-900 transition-colors"
+              >
+                Home
+              </button>
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-3 gap-8">
+            {/* Main Compliance Analysis */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Compliance Score */}
+              <div className="bg-white rounded-xl shadow-lg p-6 card-hover">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-semibold flex items-center space-x-2">
+                    <Target className="w-6 h-6 text-blue-600" />
+                    <span>Compliance Score</span>
+                  </h3>
+                  <div className="text-right">
+                    <div className="text-3xl font-bold text-blue-600">
+                      {Math.round(complianceAnalysis.compliance_score * 100)}%
+                    </div>
+                    <div className="text-sm text-gray-600">Overall Compliance</div>
+                  </div>
+                </div>
+                
+                <div className="grid md:grid-cols-3 gap-6">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-green-600 mb-1">
+                      {complianceAnalysis.rules_evaluated}
+                    </div>
+                    <div className="text-sm text-gray-600">Rules Evaluated</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-orange-600 mb-1">
+                      {complianceAnalysis.violations?.length || 0}
+                    </div>
+                    <div className="text-sm text-gray-600">Violations Found</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-blue-600 mb-1">
+                      {complianceAnalysis.confidence * 100}%
+                    </div>
+                    <div className="text-sm text-gray-600">AI Confidence</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Violations */}
+              {complianceAnalysis.violations && complianceAnalysis.violations.length > 0 && (
+                <div className="bg-white rounded-xl shadow-lg p-6 card-hover">
+                  <h3 className="text-xl font-semibold mb-4 flex items-center space-x-2">
+                    <AlertTriangle className="w-6 h-6 text-red-600" />
+                    <span>Compliance Violations</span>
+                    <span className="text-sm bg-red-100 text-red-700 px-2 py-1 rounded-full">
+                      {complianceAnalysis.violations.length}
+                    </span>
+                  </h3>
+                  
+                  <div className="space-y-4">
+                    {complianceAnalysis.violations.map((violation, index) => (
+                      <div key={index} className="border-l-4 border-red-500 pl-4 py-2">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-medium text-gray-900">{violation.rule_name || violation.message}</h4>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            violation.severity === 'high' ? 'bg-red-100 text-red-800' :
+                            violation.severity === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-green-100 text-green-800'
+                          }`}>
+                            {violation.severity?.toUpperCase() || 'UNKNOWN'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-600 mb-2">{violation.description || violation.message}</p>
+                        {violation.remediation && (
+                          <p className="text-sm text-blue-600">
+                            <strong>Remediation:</strong> {violation.remediation}
+                          </p>
+                        )}
+                        {violation.confidence && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            Confidence: {Math.round(violation.confidence * 100)}%
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Recommendations */}
+              {complianceAnalysis.recommendations && complianceAnalysis.recommendations.length > 0 && (
+                <div className="bg-white rounded-xl shadow-lg p-6 card-hover">
+                  <h3 className="text-xl font-semibold mb-4 flex items-center space-x-2">
+                    <TrendingUp className="w-6 h-6 text-green-600" />
+                    <span>Recommendations</span>
+                    <span className="text-sm bg-green-100 text-green-700 px-2 py-1 rounded-full">
+                      {complianceAnalysis.recommendations.length}
+                    </span>
+                  </h3>
+                  
+                  <div className="space-y-3">
+                    {complianceAnalysis.recommendations.map((rec, index) => (
+                      <div key={index} className="flex items-start space-x-3">
+                        <CheckCircle className="w-5 h-5 text-green-500 mt-0.5 flex-shrink-0" />
+                        <div>
+                          <p className="text-sm text-gray-800">{rec.description || rec.message}</p>
+                          {rec.priority && (
+                            <span className={`text-xs px-2 py-1 rounded-full mt-1 inline-block ${
+                              rec.priority === 'high' ? 'bg-red-100 text-red-700' :
+                              rec.priority === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                              'bg-green-100 text-green-700'
+                            }`}>
+                              {rec.priority.toUpperCase()} PRIORITY
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Categories Analyzed */}
+              {complianceAnalysis.categories_analyzed && complianceAnalysis.categories_analyzed.length > 0 && (
+                <div className="bg-white rounded-xl shadow-lg p-6 card-hover">
+                  <h3 className="text-xl font-semibold mb-4 flex items-center space-x-2">
+                    <BarChart3 className="w-6 h-6 text-purple-600" />
+                    <span>Compliance Domains Analyzed</span>
+                  </h3>
+                  
+                  <div className="grid md:grid-cols-2 gap-4">
+                    {complianceAnalysis.categories_analyzed.map((category, index) => (
+                      <div key={index} className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
+                        <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
+                        <span className="text-sm font-medium text-gray-800 capitalize">
+                          {category.replace('_', ' ')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Sidebar with Benchmarks and Info */}
+            <div className="lg:col-span-1 space-y-6">
+              {/* Analysis Info */}
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h3 className="text-lg font-semibold mb-4 flex items-center space-x-2">
+                  <FileText className="w-5 h-5 text-blue-600" />
+                  <span>Analysis Details</span>
+                </h3>
+                
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Document Type:</span>
+                    <span className="text-sm font-medium">{complianceAnalysis.document_type}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Processing Time:</span>
+                    <span className="text-sm font-medium">{complianceAnalysis.processing_time?.toFixed(2)}s</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">OCR Used:</span>
+                    <span className="text-sm font-medium">{complianceAnalysis.ocr_used ? 'Yes' : 'No'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-600">Translation Used:</span>
+                    <span className="text-sm font-medium">{complianceAnalysis.translation_used ? 'Yes' : 'No'}</span>
+                  </div>
+                  {complianceAnalysis.languages_detected && complianceAnalysis.languages_detected.length > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-sm text-gray-600">Languages:</span>
+                      <span className="text-sm font-medium">{complianceAnalysis.languages_detected.join(', ')}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Benchmarks Comparison */}
+              {benchmarksData && (
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h3 className="text-lg font-semibold mb-4 flex items-center space-x-2">
+                    <BarChart3 className="w-5 h-5 text-green-600" />
+                    <span>How You Compare</span>
+                  </h3>
+                  
+                  <div className="space-y-4">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-blue-600 mb-1">
+                        {Math.round(complianceAnalysis.compliance_score * 100)}%
+                      </div>
+                      <div className="text-sm text-gray-600">Your Score</div>
+                    </div>
+                    
+                    <div className="text-center">
+                      <div className="text-lg font-semibold text-gray-600 mb-1">
+                        {Math.round(benchmarksData.summary?.avg_compliance_score * 100 || 70)}%
+                      </div>
+                      <div className="text-sm text-gray-600">Industry Average</div>
+                    </div>
+                    
+                    <div className="text-center">
+                      <div className="text-sm text-gray-500">
+                        {complianceAnalysis.compliance_score > (benchmarksData.summary?.avg_compliance_score || 0.7) 
+                          ? 'Above Average' : 'Below Average'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h3 className="text-lg font-semibold mb-4">Next Steps</h3>
+                
+                <div className="space-y-3">
+                  <button
+                    onClick={() => setShowComplianceView(!showComplianceView)}
+                    className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                  >
+                    View Detailed Report
+                  </button>
+                  
+                  <button
+                    onClick={(e) => handleViewChange('upload', e)}
+                    className="w-full px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm"
+                  >
+                    Analyze Another Document
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // Render current view
   const renderCurrentView = () => {
     switch (currentView) {
@@ -1132,6 +1597,8 @@ const App = () => {
         return <UploadView />;
       case 'results':
         return <ResultsView />;
+      case 'compliance-results':
+        return <ComplianceResultsView />;
       default:
         return <LandingPage />;
     }

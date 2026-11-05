@@ -47,6 +47,24 @@ except ImportError as e:
     print(f"✗ Failed to import google.generativeai: {e}")
     genai = None
 
+# Import new services
+try:
+    from services.ocr_service import ocr_service
+    from services.translation_service import translation_service
+    from services.compliance_model_service import compliance_model_service
+    from services.rules_engine import rules_engine
+    from services.bq_exporter import bq_exporter
+    from services.pubsub_publisher import pubsub_publisher
+    print("✓ New services loaded successfully")
+except ImportError as e:
+    print(f"✗ Failed to import new services: {e}")
+    ocr_service = None
+    translation_service = None
+    compliance_model_service = None
+    rules_engine = None
+    bq_exporter = None
+    pubsub_publisher = None
+
 # CUAD and HuggingFace integration libraries
 try:
     from huggingface_hub import InferenceClient
@@ -135,6 +153,84 @@ class QuestionResponse(BaseModel):
     answer: str
     confidence: float
     relevant_clauses: List[str]
+
+# New models for enhanced features
+class OCRRequest(BaseModel):
+    file: UploadFile = File(...)
+
+class OCRResponse(BaseModel):
+    success: bool
+    text: str
+    confidence: float
+    language: str
+    method: str
+    metadata: Dict[str, Any]
+
+class TranslationRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=10000)
+    target_language: str = Field(..., pattern="^(hi|ta|bn|mr|en)$")
+    source_language: Optional[str] = None
+
+class TranslationResponse(BaseModel):
+    success: bool
+    translated_text: str
+    source_language: str
+    target_language: str
+    confidence: float
+    method: str
+
+class ComplianceAnalysisRequest(BaseModel):
+    document_text: str = Field(..., min_length=10, max_length=100000)
+    document_name: Optional[str] = Field(default="Untitled Document")
+    document_type: Optional[str] = Field(default=None)
+    domains: Optional[List[str]] = Field(default=None)
+    translate: bool = Field(default=False)
+    target_language: Optional[str] = Field(default="en")
+
+class ComplianceAnalysisResponse(BaseModel):
+    success: bool
+    analysis_id: str
+    compliance_score: float
+    violations: List[Dict[str, Any]]
+    recommendations: List[Dict[str, Any]]
+    categories_analyzed: List[str]
+    confidence: float
+    processing_time: float
+    rules_evaluated: int
+    document_type: str
+    languages_detected: List[str]
+    ocr_used: bool
+    translation_used: bool
+
+class RuleCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(..., min_length=1, max_length=500)
+    pattern: str = Field(..., min_length=1, max_length=1000)
+    severity: str = Field(..., pattern="^(low|medium|high)$")
+    domain: str = Field(..., min_length=1, max_length=50)
+    category: str = Field(..., min_length=1, max_length=50)
+    message: str = Field(..., min_length=1, max_length=200)
+    remediation: str = Field(..., min_length=1, max_length=500)
+    confidence_threshold: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
+
+class RuleUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, min_length=1, max_length=500)
+    pattern: Optional[str] = Field(None, min_length=1, max_length=1000)
+    severity: Optional[str] = Field(None, pattern="^(low|medium|high)$")
+    category: Optional[str] = Field(None, min_length=1, max_length=50)
+    message: Optional[str] = Field(None, min_length=1, max_length=200)
+    remediation: Optional[str] = Field(None, min_length=1, max_length=500)
+    confidence_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+class RuleTestRequest(BaseModel):
+    pattern: str = Field(..., min_length=1, max_length=1000)
+    test_text: str = Field(..., min_length=1, max_length=5000)
+
+class BenchmarksRequest(BaseModel):
+    sector: Optional[str] = None
+    state: Optional[str] = None
+    days: int = Field(default=30, ge=1, le=365)
 
 # Document Parsing Service
 class DocumentParsingService:
@@ -740,6 +836,334 @@ except Exception as e:
     cuad_service = None
     enhanced_engine = None
 
+# New API Routes for Enhanced Features
+
+@api_router.post("/ocr/analyze", response_model=OCRResponse)
+async def analyze_ocr(file: UploadFile = File(...)):
+    """Extract text from image using OCR (Google Vision + Tesseract fallback)"""
+    if not ocr_service:
+        raise HTTPException(status_code=503, detail="OCR service not available")
+    
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        if not file_content:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+        
+        # Check file size (5MB limit)
+        max_size = 5 * 1024 * 1024  # 5MB
+        if len(file_content) > max_size:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+        
+        # Extract text using OCR
+        result = await ocr_service.extract_text_from_image(file_content, file.filename)
+        
+        # Detect document type
+        doc_type_result = await ocr_service.detect_document_type(result['text'], file.filename)
+        
+        return OCRResponse(
+            success=True,
+            text=result['text'],
+            confidence=result['confidence'],
+            language=result['language'],
+            method=result['method'],
+            metadata={
+                'document_type': doc_type_result['type'],
+                'document_confidence': doc_type_result['confidence'],
+                'indicators': doc_type_result['indicators'],
+                'filename': file.filename,
+                'file_size': len(file_content),
+                'error': result.get('error')
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OCR analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"OCR analysis failed: {str(e)}")
+
+@api_router.post("/translate", response_model=TranslationResponse)
+async def translate_text(request: TranslationRequest):
+    """Translate text to target language"""
+    if not translation_service:
+        raise HTTPException(status_code=503, detail="Translation service not available")
+    
+    try:
+        result = await translation_service.translate_text(
+            request.text,
+            request.target_language,
+            request.source_language
+        )
+        
+        return TranslationResponse(
+            success=True,
+            translated_text=result['translated_text'],
+            source_language=result['source_language'],
+            target_language=result['target_language'],
+            confidence=result['confidence'],
+            method=result['method']
+        )
+        
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+@api_router.post("/analyze/compliance", response_model=ComplianceAnalysisResponse)
+async def analyze_compliance(request: ComplianceAnalysisRequest):
+    """Analyze document for Indian regulatory compliance"""
+    if not compliance_model_service or not rules_engine:
+        raise HTTPException(status_code=503, detail="Compliance analysis services not available")
+    
+    start_time = time.time()
+    analysis_id = f"compliance_{int(time.time() * 1000)}"
+    
+    try:
+        # Detect languages if not specified
+        if translation_service:
+            lang_result = await translation_service.detect_language(request.document_text)
+            languages_detected = [lang_result['language']]
+        else:
+            languages_detected = ['en']
+        
+        # Translate if requested
+        document_text = request.document_text
+        translation_used = False
+        if request.translate and request.target_language != 'en' and translation_service:
+            trans_result = await translation_service.translate_text(
+                request.document_text,
+                request.target_language
+            )
+            document_text = trans_result['translated_text']
+            translation_used = True
+            languages_detected.append(request.target_language)
+        
+        # Detect document type
+        doc_type = request.document_type
+        if not doc_type and ocr_service:
+            doc_type_result = await ocr_service.detect_document_type(document_text)
+            doc_type = doc_type_result['type']
+        
+        # Run compliance analysis
+        compliance_result = await compliance_model_service.analyze_compliance(
+            document_text,
+            doc_type,
+            request.domains
+        )
+        
+        # Run rules evaluation
+        rules_result = await rules_engine.evaluate_document(
+            document_text,
+            request.domains
+        )
+        
+        # Combine results
+        processing_time = time.time() - start_time
+        
+        # Store analysis in database
+        document_record = {
+            "analysis_id": analysis_id,
+            "document_name": request.document_name,
+            "document_text": document_text[:1000] + "..." if len(document_text) > 1000 else document_text,
+            "analysis_result": {
+                **compliance_result,
+                "rules_evaluation": rules_result,
+                "document_type": doc_type,
+                "languages_detected": languages_detected,
+                "translation_used": translation_used
+            },
+            "created_at": datetime.utcnow(),
+            "analysis_type": "compliance",
+            "jurisdiction": "IN"
+        }
+        
+        await db.document_analyses.insert_one(document_record)
+        
+        # Export to BigQuery if enabled
+        if bq_exporter:
+            await bq_exporter.export_analysis_event({
+                "analysis_id": analysis_id,
+                "document_summary": {"document_type": doc_type},
+                "risk_assessment": {"overall_risk_level": "medium"},  # Default
+                "compliance_score": compliance_result.get('compliance_score', 0.0),
+                "ai_confidence": compliance_result.get('confidence', 0.0),
+                "cuad_analysis": {"categories_analyzed": compliance_result.get('categories_analyzed', [])},
+                "enhanced_insights": {"missing_clauses": []},
+                "processing_time": processing_time,
+                "languages_detected": languages_detected,
+                "ocr_used": False,
+                "translation_used": translation_used,
+                "model_versions": {"gemini": "2.0-flash", "inlegalbert": "1.0"},
+                "document_text": document_text
+            })
+        
+        # Publish event if enabled
+        if pubsub_publisher:
+            await pubsub_publisher.publish_analysis_completed({
+                "analysis_id": analysis_id,
+                "document_summary": {"document_type": doc_type},
+                "risk_assessment": {"overall_risk_level": "medium"},
+                "compliance_score": compliance_result.get('compliance_score', 0.0),
+                "ai_confidence": compliance_result.get('confidence', 0.0),
+                "cuad_analysis": {"categories_analyzed": compliance_result.get('categories_analyzed', [])},
+                "enhanced_insights": {"missing_clauses": []},
+                "processing_time": processing_time,
+                "languages_detected": languages_detected,
+                "ocr_used": False,
+                "translation_used": translation_used,
+                "model_versions": {"gemini": "2.0-flash", "inlegalbert": "1.0"}
+            })
+        
+        return ComplianceAnalysisResponse(
+            success=True,
+            analysis_id=analysis_id,
+            compliance_score=compliance_result.get('compliance_score', 0.0),
+            violations=compliance_result.get('violations', []) + rules_result.get('violations', []),
+            recommendations=compliance_result.get('recommendations', []) + rules_result.get('recommendations', []),
+            categories_analyzed=compliance_result.get('categories_analyzed', []),
+            confidence=compliance_result.get('confidence', 0.0),
+            processing_time=processing_time,
+            rules_evaluated=rules_result.get('total_rules_checked', 0),
+            document_type=doc_type or 'unknown',
+            languages_detected=languages_detected,
+            ocr_used=False,
+            translation_used=translation_used
+        )
+        
+    except Exception as e:
+        logger.error(f"Compliance analysis failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Compliance analysis failed: {str(e)}")
+
+@api_router.post("/rules", response_model=Dict[str, Any])
+async def create_rule(request: RuleCreateRequest):
+    """Create a new custom compliance rule"""
+    if not rules_engine:
+        raise HTTPException(status_code=503, detail="Rules engine not available")
+    
+    try:
+        rule_data = request.dict()
+        result = await rules_engine.create_rule(rule_data)
+        
+        if result['success']:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result['error'])
+            
+    except Exception as e:
+        logger.error(f"Rule creation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Rule creation failed: {str(e)}")
+
+@api_router.get("/rules")
+async def get_rules(domain: Optional[str] = None):
+    """Get compliance rules for a domain or all domains"""
+    if not rules_engine:
+        raise HTTPException(status_code=503, detail="Rules engine not available")
+    
+    try:
+        result = await rules_engine.get_rules(domain)
+        return {"success": True, "data": result}
+        
+    except Exception as e:
+        logger.error(f"Failed to get rules: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get rules: {str(e)}")
+
+@api_router.put("/rules/{rule_id}", response_model=Dict[str, Any])
+async def update_rule(rule_id: str, request: RuleUpdateRequest):
+    """Update an existing custom rule"""
+    if not rules_engine:
+        raise HTTPException(status_code=503, detail="Rules engine not available")
+    
+    try:
+        rule_data = {k: v for k, v in request.dict().items() if v is not None}
+        result = await rules_engine.update_rule(rule_id, rule_data)
+        
+        if result['success']:
+            return result
+        else:
+            raise HTTPException(status_code=404, detail=result['error'])
+            
+    except Exception as e:
+        logger.error(f"Rule update failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Rule update failed: {str(e)}")
+
+@api_router.delete("/rules/{rule_id}", response_model=Dict[str, Any])
+async def delete_rule(rule_id: str):
+    """Delete a custom rule"""
+    if not rules_engine:
+        raise HTTPException(status_code=503, detail="Rules engine not available")
+    
+    try:
+        result = await rules_engine.delete_rule(rule_id)
+        
+        if result['success']:
+            return result
+        else:
+            raise HTTPException(status_code=404, detail=result['error'])
+            
+    except Exception as e:
+        logger.error(f"Rule deletion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Rule deletion failed: {str(e)}")
+
+@api_router.post("/rules/test", response_model=Dict[str, Any])
+async def test_rule(request: RuleTestRequest):
+    """Test a rule pattern against sample text"""
+    if not rules_engine:
+        raise HTTPException(status_code=503, detail="Rules engine not available")
+    
+    try:
+        result = await rules_engine.test_rule(request.pattern, request.test_text)
+        return {"success": True, "data": result}
+        
+    except Exception as e:
+        logger.error(f"Rule testing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Rule testing failed: {str(e)}")
+
+@api_router.get("/benchmarks")
+async def get_benchmarks(sector: Optional[str] = None, state: Optional[str] = None, days: int = 30):
+    """Get compliance benchmarks and analytics"""
+    if not bq_exporter:
+        # Return static benchmarks if BigQuery not available
+        return {
+            "success": True,
+            "data": {
+                "sector": sector or "general",
+                "state": state or "all",
+                "days": days,
+                "data": [
+                    {
+                        "document_type": "gst_form",
+                        "risk_level": "medium",
+                        "avg_compliance_score": 0.72,
+                        "avg_confidence": 0.85,
+                        "document_count": 150
+                    },
+                    {
+                        "document_type": "labor_document",
+                        "risk_level": "high",
+                        "avg_compliance_score": 0.68,
+                        "avg_confidence": 0.82,
+                        "document_count": 89
+                    }
+                ],
+                "summary": {
+                    "total_documents": 239,
+                    "avg_compliance_score": 0.70,
+                    "risk_distribution": {"low": 0.3, "medium": 0.5, "high": 0.2}
+                },
+                "source": "static_fallback"
+            }
+        }
+    
+    try:
+        result = await bq_exporter.get_benchmarks(sector, state, days)
+        return {"success": True, "data": result}
+        
+    except Exception as e:
+        logger.error(f"Failed to get benchmarks: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get benchmarks: {str(e)}")
+
 # API Routes
 @api_router.get("/")
 async def root():
@@ -749,12 +1173,24 @@ async def root():
 async def health_check():
     """Health check endpoint"""
     ai_status = ai_service is not None and ai_service.model is not None
+    ocr_status = ocr_service is not None
+    translation_status = translation_service is not None
+    compliance_status = compliance_model_service is not None
+    rules_status = rules_engine is not None
+    bq_status = bq_exporter is not None and bq_exporter.bq_enabled
+    pubsub_status = pubsub_publisher is not None and pubsub_publisher.pubsub_enabled
     
     return {
         "status": "healthy",
         "services": {
             "ai_analysis": ai_status,
             "database": True,
+            "ocr_service": ocr_status,
+            "translation_service": translation_status,
+            "compliance_model": compliance_status,
+            "rules_engine": rules_status,
+            "bigquery_export": bq_status,
+            "pubsub_publisher": pubsub_status,
             "timestamp": datetime.utcnow().isoformat()
         }
     }
